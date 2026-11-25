@@ -81,11 +81,9 @@ Rendering runs in the background; check `annotated_export.log` for progress.
 python build.py        # writes dist/annotated_dailies_export-<version>.rvpkg
 ```
 
-Bump `version:` in `src/PACKAGE`, commit, then tag to publish a release:
-
-```bash
-git tag v0.2 && git push origin v0.2
-```
+Bump `version:` in `src/PACKAGE` and commit. Then on GitHub go to
+**Releases › Draft a new release**, create a tag (e.g. `release-0.5`) and
+publish. A workflow builds the `.rvpkg` and attaches it to the release.
 
 ## License
 
