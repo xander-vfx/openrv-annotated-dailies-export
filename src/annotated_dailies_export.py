@@ -1,17 +1,20 @@
 """
 Annotated Dailies Export - an OpenRV Python mode.
 
-For every clip in the current playlist (the default sequence view) that has
-annotations, render:
-  - <clip>_notes.mov        the whole clip with annotations burned in
-  - <clip>_f<frame>.jpg     a still of each annotated frame
+Menu: Annotated Dailies
+  Export Annotated Clips...        for every clip that has annotations:
+                                     <clip>_notes.mov    whole clip, annotations burned in
+                                     <clip>_f<frame>.jpg still of each annotated frame
+  Export Annotated Frames Only...  just the <clip>_f<frame>.jpg stills
+
+Clips without annotations are never exported.
 
 How it works:
   1. Walk the playlist frame by frame and record which source plays on each
-     global frame, plus the source-relative frame number.
-  2. Find each source's RVPaint node and read which source frames carry strokes.
+     playlist frame, plus the source's own frame number.
+  2. Find every RVPaint node that has strokes and match it to its clip.
   3. Save a temporary copy of the session and call rvio once per clip
-     (-t globalStart-globalEnd) and once per annotated still.
+     (-t playlistStart-playlistEnd) and once per annotated still.
 
 Rendering runs in a background thread so RV stays responsive.
 Log: <output folder>/annotated_export.log
@@ -35,6 +38,8 @@ except ImportError:  # pragma: no cover
 
 
 FRAME_PROP_RE = re.compile(r"\.frame:(-?\d+)\.order$")
+STROKE_PROP_RE = re.compile(r"\.(?:pen|text):\d+:(-?\d+):")
+SOURCE_GROUP_RE = re.compile(r"(sourceGroup\d+)")
 
 
 # --------------------------------------------------------------------------
@@ -72,38 +77,36 @@ def clip_name(source_node):
         media = commands.getStringProperty(source_node + ".media.movie")
         if media and media[0]:
             base = os.path.basename(media[0])
-            # strip sequence patterns like name.#.exr / name.1001-1100#.exr
-            base = re.sub(r"[.@#%0-9-]*\.[A-Za-z0-9]+$", "", base)
+            # strip extension and any frame pattern: name.1001-1100#.exr -> name
+            base = re.sub(r"(\.[@#%0-9-]+)?\.[A-Za-z0-9]+$", "", base)
             return safe_name(base)
     except Exception:
         pass
     return safe_name(commands.nodeGroup(source_node))
 
 
-def annotated_source_frames(source_node):
-    """Source-relative frame numbers that have paint strokes on them."""
+def stroke_frames(paint_node):
+    """Frame numbers that have strokes on one RVPaint node."""
     frames = set()
-    group = commands.nodeGroup(source_node)
-    for node in commands.nodesInGroup(group):
-        if commands.nodeType(node) != "RVPaint":
-            continue
-        for prop in commands.properties(node):
-            m = FRAME_PROP_RE.search(prop)
-            if not m:
-                continue
+    for prop in commands.properties(paint_node):
+        m = FRAME_PROP_RE.search(prop)
+        if m:
             try:
-                order = commands.getStringProperty(prop)
+                if commands.getStringProperty(prop):
+                    frames.add(int(m.group(1)))
             except Exception:
-                order = []
-            if order:  # non-empty stroke list on this frame
-                frames.add(int(m.group(1)))
+                pass
+            continue
+        m = STROKE_PROP_RE.search(prop)
+        if m:
+            frames.add(int(m.group(1)))
     return frames
 
 
 def map_playlist():
     """
     Walk the playlist once. Returns a list of segments:
-      {"source": node, "start": g0, "end": g1, "src_to_global": {sf: g}}
+      {"source", "group", "start", "end", "src_to_global", "global_to_src"}
     A clip that appears twice in the playlist gives two segments.
     """
     segments = []
@@ -115,15 +118,48 @@ def map_playlist():
             continue
         src = srcs[0]
         if current is None or current["source"] != src or g != current["end"] + 1:
-            current = {"source": src, "start": g, "end": g, "src_to_global": {}}
+            current = {"source": src, "group": commands.nodeGroup(src),
+                       "start": g, "end": g,
+                       "src_to_global": {}, "global_to_src": {}}
             segments.append(current)
         current["end"] = g
         try:
             sf = commands.sourceFrame(g)
             current["src_to_global"][sf] = g
+            current["global_to_src"][g] = sf
         except Exception:
             pass
     return segments
+
+
+def collect_annotations(segments):
+    """
+    Set seg["annotated"] = source frames with strokes, for each segment.
+
+    Annotations can live on:
+      sourceGroup000000_paint               (drawn while viewing the clip alone)
+      defaultSequence_p_sourceGroup000000   (drawn while viewing the playlist)
+      a view-level paint node               (no source in its name)
+    """
+    for seg in segments:
+        seg["annotated"] = set()
+
+    for node in commands.nodes():
+        if commands.nodeType(node) != "RVPaint":
+            continue
+        frames = stroke_frames(node)
+        if not frames:
+            continue
+        m = SOURCE_GROUP_RE.search(node)
+        owner = m.group(1) if m else None
+        candidates = [s for s in segments if s["group"] == owner] if owner else segments
+
+        for f in frames:
+            for seg in candidates:
+                if owner and f in seg["src_to_global"]:
+                    seg["annotated"].add(f)
+                elif seg["start"] <= f <= seg["end"]:
+                    seg["annotated"].add(seg["global_to_src"].get(f, f))
 
 
 # --------------------------------------------------------------------------
@@ -140,8 +176,8 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
             None,
             None,
             [("Annotated Dailies", [
-                ("Export Annotated Clips...", self.export_annotated, None, self.menu_state),
-                ("Export All Clips...", self.export_all, None, self.menu_state),
+                ("Export Annotated Clips...", self.export_clips, None, self.menu_state),
+                ("Export Annotated Frames Only...", self.export_frames, None, self.menu_state),
             ])],
         )
 
@@ -151,15 +187,15 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
 
     # -- menu callbacks ----------------------------------------------------
 
-    def export_annotated(self, event):
-        self._run(only_annotated=True)
+    def export_clips(self, event):
+        self._run(movies=True)
 
-    def export_all(self, event):
-        self._run(only_annotated=False)
+    def export_frames(self, event):
+        self._run(movies=False)
 
     # -- main --------------------------------------------------------------
 
-    def _run(self, only_annotated):
+    def _run(self, movies):
         rvio = find_rvio()
         if not rvio:
             extra_commands.displayFeedback(
@@ -180,26 +216,26 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
 
         try:
             segments = map_playlist()
+            collect_annotations(segments)
             jobs = []
+            used = {}
             for seg in segments:
-                frames = annotated_source_frames(seg["source"])
-                if only_annotated and not frames:
-                    continue
+                frames = seg["annotated"]
+                if not frames:
+                    continue  # never export a clip without annotations
                 name = clip_name(seg["source"])
-                # The same clip twice in a playlist gets a suffix.
-                existing = [j for j in jobs if j["name"].startswith(name)]
-                if any(j["kind"] == "movie" for j in existing):
-                    name = "%s_%d" % (name, len(existing) + 1)
+                used[name] = used.get(name, 0) + 1
+                if used[name] > 1:  # same clip twice in the playlist
+                    name = "%s_%d" % (name, used[name])
 
-                jobs.append({"kind": "movie", "name": name,
-                             "range": "%d-%d" % (seg["start"], seg["end"]),
-                             "out": os.path.join(out_dir, name + "_notes.mov")})
+                if movies:
+                    jobs.append({"range": "%d-%d" % (seg["start"], seg["end"]),
+                                 "out": os.path.join(out_dir, name + "_notes.mov")})
                 for sf in sorted(frames):
                     g = seg["src_to_global"].get(sf)
                     if g is None:
                         continue  # annotation is outside the clip's cut range
-                    jobs.append({"kind": "still", "name": name,
-                                 "range": "%d-%d" % (g, g),
+                    jobs.append({"range": "%d-%d" % (g, g),
                                  "out": os.path.join(out_dir, "%s_f%04d.jpg" % (name, sf))})
 
             if not jobs:
@@ -214,9 +250,8 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
             if previous_view and previous_view != commands.viewNode():
                 commands.setViewNode(previous_view)
 
-        n_movies = sum(1 for j in jobs if j["kind"] == "movie")
         extra_commands.displayFeedback(
-            "Exporting %d clips (%d files) to %s ..." % (n_movies, len(jobs), out_dir), 5.0)
+            "Exporting %d files to %s ..." % (len(jobs), out_dir), 5.0)
 
         self._worker = threading.Thread(
             target=self._render, args=(rvio, session_path, jobs, out_dir), daemon=True)
@@ -246,7 +281,6 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
             os.rmdir(os.path.dirname(session_path))
         except OSError:
             pass
-        # Feedback is shown at start; check the log for completion and errors.
         print("[annotated-dailies-export] finished, %d failures, log: %s"
               % (failures, log_path))
 

@@ -48,8 +48,12 @@ setx RVIO_PATH "D:\apps\openRV\bin\rvio.exe"
 
 1. Load your dailies (they play as a sequence).
 2. Annotate frames with RV's annotation tool.
-3. **Annotated Dailies › Export Annotated Clips...** (or **Export All Clips...**)
-   and choose an output folder.
+3. Choose an output folder from either menu item:
+   - **Annotated Dailies › Export Annotated Clips...** – a movie per annotated
+     clip plus a still of each annotated frame
+   - **Annotated Dailies › Export Annotated Frames Only...** – just the stills
+
+Clips without annotations are never exported.
 
 Rendering runs in the background; check `annotated_export.log` for progress.
 
@@ -57,7 +61,9 @@ Rendering runs in the background; check `annotated_export.log` for progress.
 
 1. Walks the playlist frame by frame and records which source plays on each
    frame and its source-relative frame number.
-2. Reads each source's `RVPaint` node to find which frames have strokes.
+2. Reads every `RVPaint` node with strokes and matches it to its clip – both
+   per-clip paint nodes (drawn viewing a single clip) and the playlist's
+   per-clip paint nodes (drawn viewing the playlist).
 3. Saves a temporary copy of the session and runs `rvio session.rv -t start-end`
    once per clip, and once per annotated still.
 

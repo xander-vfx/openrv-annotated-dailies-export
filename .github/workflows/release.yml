@@ -1,0 +1,23 @@
+# Push a tag like v0.1 and GitHub builds the .rvpkg and attaches it to a Release.
+name: Build and release rvpkg
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m py_compile src/annotated_dailies_export.py
+      - run: python build.py
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.rvpkg
