@@ -103,12 +103,67 @@ def stroke_frames(paint_node):
     return frames
 
 
+def _group_source(group):
+    """The file/image source node inside a source group."""
+    for n in commands.nodesInGroup(group):
+        if commands.nodeType(n) in ("RVFileSource", "RVImageSource"):
+            return n
+    return group + "_source"
+
+
+def _make_segment(group, start, first_src_frame, length):
+    seg = {"source": _group_source(group), "group": group,
+           "start": start, "end": start + length - 1,
+           "src_to_global": {}, "global_to_src": {}}
+    for i in range(length):
+        sf, g = first_src_frame + i, start + i
+        seg["src_to_global"][sf] = g
+        seg["global_to_src"][g] = sf
+    return seg
+
+
+def map_playlist_from_edl(sequence_group):
+    """
+    Read the playlist's cut list straight from the sequence node's EDL:
+      edl.source  index into the sequence's inputs (last entry is a terminator)
+      edl.frame   playlist frame where each cut starts
+      edl.in/out  the clip's own first/last frame for that cut
+    """
+    seq = next((n for n in commands.nodesInGroup(sequence_group)
+                if commands.nodeType(n) == "RVSequence"), None)
+    if not seq:
+        return []
+    src = commands.getIntProperty(seq + ".edl.source")
+    frm = commands.getIntProperty(seq + ".edl.frame")
+    fin = commands.getIntProperty(seq + ".edl.in")
+    fout = commands.getIntProperty(seq + ".edl.out")
+    inputs = commands.nodeConnections(sequence_group, False)[0]
+
+    segments = []
+    for i in range(len(src) - 1):  # skip the terminator entry
+        length = fout[i] - fin[i] + 1
+        if length <= 0 or src[i] >= len(inputs):
+            continue
+        segments.append(_make_segment(inputs[src[i]], frm[i], fin[i], length))
+    return segments
+
+
 def map_playlist():
     """
-    Walk the playlist once. Returns a list of segments:
+    Returns a list of segments, one per cut in the playlist:
       {"source", "group", "start", "end", "src_to_global", "global_to_src"}
     A clip that appears twice in the playlist gives two segments.
+    Uses the sequence EDL; falls back to asking RV frame by frame.
     """
+    seq_group = commands.viewNode()
+    if commands.nodeType(seq_group) == "RVSequenceGroup":
+        try:
+            segments = map_playlist_from_edl(seq_group)
+            if segments:
+                return segments
+        except Exception as e:
+            print("[annotated-dailies-export] EDL read failed, walking frames: %s" % e)
+
     segments = []
     current = None
     for g in range(commands.frameStart(), commands.frameEnd() + 1):
@@ -239,7 +294,13 @@ class AnnotatedDailiesExport(rvtypes.MinorMode):
                                  "out": os.path.join(out_dir, "%s_f%04d.jpg" % (name, sf))})
 
             if not jobs:
-                extra_commands.displayFeedback("No annotated clips found", 4.0)
+                print("[annotated-dailies-export] nothing to export. Clips seen:")
+                for seg in segments:
+                    print("  %s %s playlist %d-%d annotated=%s"
+                          % (seg["group"], clip_name(seg["source"]),
+                             seg["start"], seg["end"], sorted(seg["annotated"])))
+                extra_commands.displayFeedback(
+                    "No annotated clips found (details in RV's console)", 5.0)
                 return
 
             # Snapshot the session so rendering doesn't depend on live edits.
