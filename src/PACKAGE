@@ -1,0 +1,20 @@
+package: Annotated Dailies Export
+author: Dr. Octopus
+organization: ""
+contact: ""
+version: 0.1
+url: ""
+rv: 4.0.0
+openrv: 1.0.0
+requires: ''
+
+modes:
+  - file: annotated_dailies_export
+    load: immediate
+
+description: |
+  <p>Exports every clip in the current playlist that has annotations as its own
+  movie, with the annotations burned in, plus a still of each annotated frame.
+  Uses rvio on a temporary copy of the session.</p>
+  <p>Menu: Annotated Dailies &gt; Export Annotated Clips...</p>
+  <p>Set RVIO_PATH if rvio is not next to rv or on your PATH.</p>
